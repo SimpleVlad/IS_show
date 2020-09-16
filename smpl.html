@@ -1,0 +1,267 @@
+<html>
+  <head>
+    <meta charset="utf-8">
+    <title>CVdrawing</title>
+  </head>
+  <body>
+    <p id="status">OpenCV.js is loading...</p>
+    <canvas id="canvas" disabled=true></canvas>
+    <!-- <img id="src" src="test.png"/> -->
+    <img id="src" src="test3.jpg"/>
+    <input type="button" id="myButton" value="Test" onclick="main()" />
+    <input type="button" id="startAlgo" value="Start" disabled=true onclick="main()">
+
+    <script type="text/javascript">
+      var src;
+      var zero_crossing;
+      var img_canny;
+      var grayscale;
+      var Ix;
+      var Iy;
+      var gradient_magnitude;
+      var cost;
+      var hit_map_x;
+      var hit_map_y;
+      let lastX;
+      let lastY;
+
+      class PriorityQueue 
+      {
+        constructor() 
+        {
+            this.queue = [];
+        }
+
+        enqueue(obj, level)
+        {
+          let i = 0;
+          while(i < this.queue.length && this.queue[i].level <= level)
+            ++i;
+          this.queue.splice(i,0,{
+            value : obj,
+            level
+          });
+        }
+
+        dequeue()
+        {
+          return this.queue.shift();
+        }
+
+        empty()
+        {
+          return this.queue.length === 0;
+        }
+
+        length()
+        {
+          return this.queue.length;
+        }
+
+        top()
+        {
+          return this.queue[0];
+        }
+      }
+
+      window.onload = function()
+      {
+        context = document.getElementById("canvas").getContext("2d");
+        img = document.getElementById("src");
+        context.canvas.width = img.width;
+        context.canvas.height = img.height;
+        context.drawImage(img, 0, 0);
+      };
+
+
+      function local_cost(p, q)
+      {
+        let dp;
+        let dq;
+        let fG = gradient_magnitude.data32F[q.y * gradient_magnitude.cols * gradient_magnitude.channels() + q.x * gradient_magnitude.channels()];
+        let WEIGHT_LAP_ZERO_CROSS = 0.43;
+        let WEIGHT_GRADIENT_MAGNITUDE = 0.14;
+        let WEIGHT_GRADIENT_DIRECTION = 0.43;
+        let Iy_data = Iy.data32F;
+        let Ix_data = Ix.data32F;
+
+        let isDiag = (p.x != q.x) && (p.y != q.y);
+
+        if ((Iy_data[p.y * Iy.cols + p.x] * (q.x - p.x) - Ix_data[p.y * Ix.cols + p.x] * (q.y - p.y)) >= 0)
+        {
+          dp = Iy_data[p.y * Iy.cols + p.x] * (q.x - p.x) - Ix_data[p.y * Ix.cols + p.x] * (q.y - p.y);
+          dq = Iy_data[q.y * Iy.cols + q.x] * (q.x - p.x) - Ix_data[q.y * Ix.cols + q.x] * (q.y - p.y);
+        }
+        else
+        {
+          dp = Iy_data[p.y * Iy.cols + p.x] * (p.x - q.x) - Ix_data[p.y * Ix.cols + p.x] * (p.y - q.y);
+          dq = Iy_data[q.y * Iy.cols + q.x] * (p.x - q.x) - Ix_data[q.y * Ix.cols + q.x] * (p.y - q.y);
+        }
+        if (isDiag)
+        {
+          dp /= Math.sqrt(2);
+          dq /= Math.sqrt(2);
+        }
+        else
+        {
+          fG /= Math.sqrt(2);
+        }
+        return WEIGHT_LAP_ZERO_CROSS * zero_crossing.data[q.y * zero_crossing.cols + q.x] +  WEIGHT_GRADIENT_DIRECTION * (Math.acos(dp) + Math.acos(dq)) / Math.PI + WEIGHT_GRADIENT_MAGNITUDE *fG;
+      }
+
+      function find_min_path(start)
+      {
+        let begin;
+        let cost_map = new cv.Mat(src.rows, src.cols, cv.CV_32F, new cv.Scalar(Number.MAX_VALUE));
+        let expandned = new cv.Mat(src.rows, src.cols, cv.CV_8UC1, new cv.Scalar(0));
+        let processed = new cv.Mat(src.rows, src.cols, cv.CV_8U, new cv.Scalar(0));
+        let removed = new cv.Mat(src.rows, src.cols, cv.CV_8UC1, new cv.Scalar(0));
+        let L = new PriorityQueue();
+        hit_map_x = new cv.Mat(src.rows, src.cols, cv.CV_32S, new cv.Scalar(0));
+        hit_map_y = new cv.Mat(src.rows, src.cols, cv.CV_32S, new cv.Scalar(0));
+        cost_map.data32F[start.y * cost_map.cols + start.x] = 0;
+        processed.data[start.y * processed.cols + start.x] = 1;
+
+        begin = {cost: 0, next_point: start};
+        L.enqueue(begin.next_point, begin.cost);
+
+        let iter = 0;
+        while(!L.empty())
+        {
+          let P = L.top();
+          L.dequeue(); 
+          let p = P.value;
+          processed.data[p.y * processed.cols + p.x] = 0;
+
+          if (removed.data[start.y * removed.cols + start.x] == 0)
+          {
+            expandned.data[p.y * expandned.cols + p.x] = 1;
+            for(let i = -1; i <= 1; i++)
+            {
+              for(let j = -1; j <= 1; j++)
+              {
+                let tx = p.x + i;
+                let ty = p.y + j;
+                if (tx < 0 || tx >= src.cols || ty < 0 || ty >= src.rows)
+                  continue;
+                if (expandned.data[ty * expandned.cols + tx] == 0)
+                {
+                  let q = {x: tx,y: ty};
+                  let cost = cost_map.data32F[p.y * cost_map.cols + p.x]  +  local_cost(p, q);
+
+                  if (processed.data[q.y * processed.cols + q.x] == 1 && cost < cost_map.data32F[q.y * cost_map.cols + q.x])
+                  {
+                    removed.data[q.y * removed.cols + q.x] = 1;
+                  }
+                  if (processed.data[q.y * processed.cols + q.x] == 0)
+                  {
+                    cost_map.data32F[q.y * cost_map.cols + q.x]= cost;
+                    hit_map_x.data32S[q.y * hit_map_x.cols + q.x ] = p.x;
+                    hit_map_y.data32S[q.y * hit_map_y.cols + q.x ] = p.y;
+
+                    processed.data[q.y * processed.cols + q.x] = 1
+                    L.enqueue(q,cost_map.data32F[q.y * cost_map.cols + q.x]);
+                  }
+                }    
+              }
+            }
+          }
+          iter=iter+1;
+          cv.imshow("canvas",  src);
+        }
+      }
+
+      function main()
+      {
+        src = cv.imread("src");
+        zero_crossing = new cv.Mat();
+        img_canny = new cv.Mat();
+        grayscale = new cv.Mat();
+        Ix = new cv.Mat();
+        Iy = new cv.Mat();
+        let ptr_pix = new cv.Point(20,70);
+        hit_map_x = new cv.Mat(src.rows, src.cols, cv.CV_32S, new cv.Scalar(0));
+        hit_map_y = new cv.Mat(src.rows, src.cols, cv.CV_32S, new cv.Scalar(0));
+
+
+        gradient_magnitude = new cv.Mat();
+        cv.cvtColor(src, grayscale, cv.COLOR_RGBA2GRAY);
+        cv.Canny(grayscale, img_canny,  50, 100);  
+        cv.threshold(img_canny, zero_crossing, 254, 1, cv.THRESH_BINARY_INV);
+        cv.Sobel(grayscale, Ix, cv.CV_32FC1, 1, 0, 1);
+        cv.Sobel(grayscale, Iy, cv.CV_32FC1, 0, 1, 1);
+
+        Ix.convertTo(Ix, cv.CV_32F, 1.0/255);
+        Iy.convertTo(Iy, cv.CV_32F, 1.0/255);
+        let max_val;
+        cv.magnitude(Iy, Ix, gradient_magnitude);
+        let result = cv.minMaxLoc(gradient_magnitude);
+        let maxPoint = result.maxVal;
+        console.log("F")
+        gradient_magnitude.convertTo(gradient_magnitude, cv.CV_32F, -1/maxPoint, 1.0);
+        // console.log(gradient_magnitude.data32S[1],src, zero_crossing,gradient_magnitude,Ix,Iy,hit_map_x,hit_map_y)
+        // cv.find_min_path(new cv.Point(1,1),src, zero_crossing,gradient_magnitude,Ix,Iy,hit_map_x,hit_map_y)
+        // console.log("2")
+        // console.log(hit_map_x.intAt(534,700))
+        // console.log(hit_map_y.intAt(534,700))
+        // cv.Canny()
+      }
+
+      document.getElementById("canvas").onmousedown = function(e)
+      {
+        lastX = e.pageX - this.offsetLeft;
+        lastY = e.pageY - this.offsetTop;
+        console.log("start")
+        let ptr_pix = new cv.Point(lastX,lastY)
+        cv.find_min_path(ptr_pix,src, zero_crossing,gradient_magnitude,Ix,Iy,hit_map_x,hit_map_y)
+        console.log("done")
+      };
+
+
+      document.getElementById("canvas").onmousemove = function(e)
+      {
+        let dst = src.clone();
+        console.log(1)
+        if (lastX != undefined)
+        {
+          let x = e.pageX - this.offsetLeft;
+          let y = e.pageY - this.offsetTop;
+          console.log(2)
+
+          while((x!=lastX) || (y!=lastY))
+          {
+   
+            cv.line(dst, new cv.Point(hit_map_x.data32S[y * hit_map_x.cols + x ], hit_map_y.data32S[y * hit_map_y.cols + x ]), new cv.Point(x, y),new cv.Scalar(255, 255, 255, 255), 1);
+            let A = new cv.Point(hit_map_x.data32S[y * hit_map_x.cols + x ], hit_map_y.data32S[y * hit_map_y.cols + x ])
+            console.log(A)
+            console.log(hit_map_x.data32S[y * hit_map_x.cols + x])
+            console.log(hit_map_y.data32S[y * hit_map_y.cols + x])
+            x=A.x
+            y=A.y
+            cv.imshow("canvas", dst);
+          }
+        }
+      }
+
+      document.getElementById("canvas").onmouseleave = function(e)
+      {
+          lastX = undefined;
+          lastY = undefined;
+      };
+
+      function onOpenCvReady()
+      {
+        document.getElementById("status").innerHTML = "OpenCV.js is ready.";
+        cv["onRuntimeInitialized"] = () =>
+        {
+          document.getElementById("startAlgo").disabled = false;
+        }
+      }
+
+    </script>
+
+    <script async src="opencv.js" onload="onOpenCvReady();" type="text/javascript">
+    </script>
+
+  </body>
+</html>
